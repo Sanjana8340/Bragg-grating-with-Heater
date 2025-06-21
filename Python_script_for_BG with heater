@@ -1,0 +1,143 @@
+import pya
+from pya import *
+import math
+from SiEPIC.utils import get_technology_by_name
+from SiEPIC.extend import to_itype
+from SiEPIC._globals import PIN_LENGTH
+from SiEPIC.utils.layout import make_pin
+
+
+class bragg_grating_with_heater(pya.PCellDeclarationHelper):
+    def __init__(self):
+        super(bragg_grating_with_heater, self).__init__()
+        TECHNOLOGY = get_technology_by_name("EBeam")
+
+        self.param("number_of_periods", self.TypeInt, "Number of grating periods", default=300)
+        self.param("grating_period", self.TypeDouble, "Grating period (µm)", default=0.317)
+        self.param("corrugation_width", self.TypeDouble, "Corrugation width (µm)", default=0.05)
+        self.param("misalignment", self.TypeDouble, "Grating misalignment (µm)", default=0.0)
+        self.param("sinusoidal", self.TypeBoolean, "Grating Type (Rectangular=False, Sinusoidal=True)", default=False)
+        self.param("wg_width", self.TypeDouble, "Waveguide width (µm)", default=0.5)
+        self.param("heater_width", self.TypeDouble, "Heater width (µm)", default=4.0)
+        self.param("metal_width", self.TypeDouble, "Metal contact width (µm)", default=10.0)
+
+        self.param("layer", self.TypeLayer, "Si Layer", default=TECHNOLOGY["Si"])
+        self.param("pinrec", self.TypeLayer, "PinRec Layer", default=TECHNOLOGY["PinRec"])
+        self.param("pinrecm", self.TypeLayer, "PinRecM Layer", default=TECHNOLOGY["PinRecM"])
+        self.param("devrec", self.TypeLayer, "DevRec Layer", default=TECHNOLOGY["DevRec"])
+        self.param("heater_layer", self.TypeLayer, "Heater Layer", default=TECHNOLOGY["M1_heater"])
+        self.param("metal_layer", self.TypeLayer, "Metal Layer", default=TECHNOLOGY["M2_router"])
+
+    def display_text_impl(self):
+        return f"BraggGratingHeater_{self.number_of_periods}p"
+
+    def produce_impl(self):
+        dbu = self.layout.dbu
+        ly = self.layout
+        shapes = self.cell.shapes
+
+        LayerSi = ly.layer(self.layer)
+        LayerPinRec = ly.layer(self.pinrec)
+        LayerPinRecM = ly.layer(self.pinrecm)
+        LayerDevRec = ly.layer(self.devrec)
+        LayerHeater = ly.layer(self.heater_layer)
+        LayerMetal = ly.layer(self.metal_layer)
+
+        grating_period = to_itype(self.grating_period, dbu)
+        half_gp = grating_period // 2
+        w = to_itype(self.wg_width, dbu)
+        half_w = w // 2
+        half_corr = to_itype(self.corrugation_width / 2, dbu)
+        misalignment = to_itype(self.misalignment, dbu)
+        heater_w = self.heater_width
+        metal_w = self.metal_width
+
+        length = 0
+
+        if self.sinusoidal:
+            npoints_sin = 40
+            for i in range(self.number_of_periods):
+                x = i * grating_period
+                pts_top = [Point(x, 0)]
+                pts_bot = [Point(x + misalignment, 0)]
+                for i1 in range(npoints_sin + 1):
+                    x1 = i1 * 2 * math.pi / npoints_sin
+                    y1 = half_corr * math.sin(x1)
+                    x1 = x1 / (2 * math.pi) * grating_period
+                    pts_top.append(Point(x + x1, half_w + y1))
+                    pts_bot.append(Point(x + misalignment + x1, -half_w - y1))
+                pts_top.append(Point(x + grating_period, 0))
+                pts_bot.append(Point(x + grating_period + misalignment, 0))
+                shapes(LayerSi).insert(Polygon(pts_top))
+                shapes(LayerSi).insert(Polygon(pts_bot))
+            length = (self.number_of_periods * grating_period) + misalignment
+
+            if misalignment > 0:
+                shapes(LayerSi).insert(Box(length - misalignment, 0, length, half_w))
+                shapes(LayerSi).insert(Box(0, 0, misalignment, -half_w))
+
+        else:
+            for i in range(self.number_of_periods):
+                x = i * grating_period
+                # Top corrugation
+                shapes(LayerSi).insert(Box(x, 0, x + half_gp, half_w + half_corr))
+                shapes(LayerSi).insert(Box(x + half_gp, 0, x + grating_period, half_w - half_corr))
+                # Bottom corrugation
+                shapes(LayerSi).insert(Box(x + misalignment, 0, x + half_gp + misalignment, -half_w - half_corr))
+                shapes(LayerSi).insert(Box(x + half_gp + misalignment, 0, x + grating_period + misalignment, -half_w + half_corr))
+
+            length = self.number_of_periods * grating_period + misalignment
+
+            if misalignment > 0:
+                shapes(LayerSi).insert(Box(length - misalignment, 0, length, half_w))
+                shapes(LayerSi).insert(Box(0, 0, misalignment, -half_w))
+
+        # Heater
+        heater_path = DPath([DPoint(0, 0), DPoint(length * dbu, 0)], heater_w)
+        self.cell.shapes(LayerHeater).insert(heater_path.simple_polygon())
+
+        # Metal contacts
+        self.cell.shapes(LayerMetal).insert(DPath([
+            DPoint(metal_w / 2, -heater_w / 2),
+            DPoint(metal_w / 2, heater_w / 2)], metal_w))
+        self.cell.shapes(LayerMetal).insert(DPath([
+            DPoint((length * dbu) - metal_w / 2, -heater_w / 2),
+            DPoint((length * dbu) - metal_w / 2, heater_w / 2)], metal_w))
+
+        # Electrical Pins
+        make_pin(self.cell, "elec1", [metal_w / 2, heater_w / 2], to_itype(metal_w, dbu), LayerPinRecM, 90)
+        make_pin(self.cell, "elec2", [(length * dbu) - metal_w / 2, heater_w / 2], to_itype(metal_w, dbu), LayerPinRecM, 90)
+
+        # Optical Pins
+        make_pin(self.cell, "opt1", [0, 0], w, LayerPinRec, 180)
+        make_pin(self.cell, "opt2", [length, 0], w, LayerPinRec, 0)
+
+        # DevRec
+        h = max(w * 3 * dbu, to_itype(heater_w / 2, dbu))
+        devrec_box = Box(0, -h, length, h)
+        shapes(LayerDevRec).insert(devrec_box)
+
+        # Metadata
+        shapes(LayerDevRec).insert(Text("Component=bragg_grating_with_heater", Trans(Trans.R0, 0, 0), to_itype(0.1, dbu)))
+        shapes(LayerDevRec).insert(Text(
+            f"Spice_param:number_of_periods={self.number_of_periods} "
+            f"grating_period={self.grating_period*1e-6:.3g} "
+            f"corrugation_width={self.corrugation_width*1e-6:.3g} "
+            f"misalignment={self.misalignment*1e-6:.3g} "
+            f"sinusoidal={int(self.sinusoidal)}",
+            Trans(Trans.R0, int(length / 10), 0), to_itype(0.1, dbu)))
+
+
+# Register in library
+class EBeam_Personal(pya.Library):
+    def __init__(self):
+        tech_name = "EBeam_Personal"
+        print(f"Initializing '{tech_name}' Library.")
+        self.description = "EBeam Personal Library with Bragg Grating with Heater"
+        self.technology = "EBeam"
+        self.layout().register_pcell("bragg_grating_with_heater", bragg_grating_with_heater())
+        self.register(tech_name)
+
+
+# Instantiate the library
+EBeam_Personal()
