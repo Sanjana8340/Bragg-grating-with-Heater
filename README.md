@@ -1,0 +1,1 @@
+This repository contains Python code for designing and simulating a silicon photonic Bragg grating with an integrated TiN heater, using the KLayout layout editor and its macro development environment.
